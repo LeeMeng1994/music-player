@@ -6,8 +6,225 @@ import random
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QListWidget, QListWidgetItem,
-    QSplitter, QMenu, QSystemTrayIcon, QStyle
+    QSplitter, QMenu, QSystemTrayIcon, QStyle, QAbstractItemView
 )
+
+class MiniModeWindow(QWidget):
+    """独立的迷你模式窗口"""
+    def __init__(self, player):
+        super().__init__()
+        self.player = player
+        self._init_ui()
+        
+        # 无边框、置顶、工具窗口
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setFixedSize(420, 170)
+        
+        # 移动到屏幕右下角
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.width() - 440, screen.height() - 200)
+    
+    def _init_ui(self):
+        self.setStyleSheet("""
+            QWidget { background-color: #1a1a2e; color: #e0e0e0; }
+            QPushButton { 
+                background-color: transparent; 
+                border: none; 
+                color: #e0e0e0;
+                font-size: 16px; 
+                padding: 4px; 
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #2a2a4a; }
+            QLabel { color: #e0e0e0; }
+        """)
+        
+        # 启用鼠标跟踪以支持拖动
+        self.setMouseTracking(True)
+        self._drag_pos = None
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(6)
+        
+        # 顶部：歌曲信息 + 关闭按钮
+        top_layout = QHBoxLayout()
+        
+        self.lbl_title = QLabel("未播放")
+        self.lbl_title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        self.lbl_title.setStyleSheet("color: #ffffff;")
+        self.lbl_title.setMaximumWidth(280)
+        top_layout.addWidget(self.lbl_title)
+        
+        top_layout.addStretch()
+        
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setToolTip("关闭")
+        btn_close.clicked.connect(self.player.close)
+        top_layout.addWidget(btn_close)
+        
+        btn_restore = QPushButton("□")
+        btn_restore.setFixedSize(24, 24)
+        btn_restore.setToolTip("恢复窗口")
+        btn_restore.clicked.connect(self.player.exit_mini_mode)
+        top_layout.addWidget(btn_restore)
+        
+        layout.addLayout(top_layout)
+        
+        # 歌词显示
+        self.lbl_lyrics = QLabel("暂无歌词")
+        self.lbl_lyrics.setFont(QFont("Microsoft YaHei", 11))
+        self.lbl_lyrics.setStyleSheet("color: #4a9eff;")
+        self.lbl_lyrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_lyrics.setMaximumHeight(30)
+        layout.addWidget(self.lbl_lyrics)
+        
+        # 中间：进度条
+        self.progress = QSlider(Qt.Orientation.Horizontal)
+        self.progress.setRange(0, 1000)
+        self.progress.sliderReleased.connect(self._on_seek)
+        self.progress.setStyleSheet("""
+            QSlider::groove:horizontal { height: 3px; background: #3a3a5a; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #4a9eff; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 10px; height: 10px; margin: -3px 0; background: #4a9eff; border-radius: 5px; }
+        """)
+        layout.addWidget(self.progress)
+        
+        # 底部：控制按钮
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.setSpacing(8)
+        ctrl_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.btn_mode = QPushButton("🔁")
+        self.btn_mode.setFixedSize(28, 28)
+        self.btn_mode.clicked.connect(self.player.cycle_mode)
+        ctrl_layout.addWidget(self.btn_mode)
+        
+        self.btn_prev = QPushButton("⏮")
+        self.btn_prev.setFixedSize(32, 32)
+        self.btn_prev.setFont(QFont("Segoe UI", 12))
+        self.btn_prev.clicked.connect(self.player.play_prev)
+        ctrl_layout.addWidget(self.btn_prev)
+        
+        self.btn_play = QPushButton("▶")
+        self.btn_play.setFixedSize(44, 44)
+        self.btn_play.setFont(QFont("Segoe UI", 16))
+        self.btn_play.setStyleSheet("""
+            QPushButton { background-color: #4a9eff; border-radius: 22px; color: white; }
+            QPushButton:hover { background-color: #5aadff; }
+        """)
+        self.btn_play.clicked.connect(self.player.toggle_play)
+        ctrl_layout.addWidget(self.btn_play)
+        
+        self.btn_next = QPushButton("⏭")
+        self.btn_next.setFixedSize(32, 32)
+        self.btn_next.setFont(QFont("Segoe UI", 12))
+        self.btn_next.clicked.connect(self.player.play_next)
+        ctrl_layout.addWidget(self.btn_next)
+        
+        self.btn_mute = QPushButton("🔊")
+        self.btn_mute.setFixedSize(28, 28)
+        self.btn_mute.clicked.connect(self.player.toggle_mute)
+        ctrl_layout.addWidget(self.btn_mute)
+        
+        layout.addLayout(ctrl_layout)
+    
+    def _on_seek(self):
+        value = self.progress.value()
+        dur = self.player.media_player.duration()
+        if dur > 0:
+            pos = int(value / 1000 * dur)
+            self.player.media_player.setPosition(pos)
+    
+    def update_display(self):
+        """更新显示"""
+        # 更新标题
+        idx = self.player.current_index
+        if 0 <= idx < len(self.player.playlist):
+            path = self.player.playlist[idx]
+            title = os.path.basename(path)
+            try:
+                from mutagen import File
+                audio = File(path)
+                if audio and audio.tags:
+                    t = str(audio.tags.get('TIT2', [''])[0]) if hasattr(audio.tags, 'get') else ''
+                    a = str(audio.tags.get('TPE1', [''])[0]) if hasattr(audio.tags, 'get') else ''
+                    if t:
+                        title = t
+                        if a:
+                            title += f" - {a}"
+            except:
+                pass
+            self.lbl_title.setText(title)
+        
+        # 更新播放按钮
+        is_playing = self.player.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.btn_play.setText("⏸" if is_playing else "▶")
+        
+        # 更新模式按钮
+        icons = ["🔁", "🔀", "🔂"]
+        self.btn_mode.setText(icons[self.player.play_mode])
+        
+        # 更新静音按钮
+        self.btn_mute.setText("🔇" if self.player.audio_output.isMuted() else "🔊")
+        
+        # 更新进度条
+        dur = self.player.media_player.duration()
+        pos = self.player.media_player.position()
+        if dur > 0:
+            self.progress.blockSignals(True)
+            self.progress.setValue(int(pos / dur * 1000))
+            self.progress.blockSignals(False)
+        
+        # 更新歌词
+        self._update_lyrics(pos)
+    
+    def closeEvent(self, event):
+        """关闭迷你窗口时，退出程序"""
+        self.player.close()
+        event.accept()
+    
+    def mousePressEvent(self, event):
+        """记录鼠标按下位置，用于拖动窗口"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        """拖动窗口"""
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def _update_lyrics(self, pos_ms):
+        """更新迷你窗口歌词显示"""
+        if not self.player.lyrics_data:
+            self.lbl_lyrics.setText("暂无歌词")
+            return
+        
+        # 找到当前播放位置对应的歌词行
+        current_text = ""
+        for i, (time_ms, text) in enumerate(self.player.lyrics_data):
+            if time_ms <= pos_ms:
+                current_text = text
+            else:
+                break
+        
+        if current_text:
+            self.lbl_lyrics.setText(current_text)
+        else:
+            self.lbl_lyrics.setText("暂无歌词")
+    
+    def mouseReleaseEvent(self, event):
+        """释放鼠标，清除拖动位置"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = None
+            event.accept()
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QKeySequence, QShortcut, QFont, QIcon, QAction
@@ -35,6 +252,8 @@ class MusicPlayer(QMainWindow):
         self.play_mode = 0  # 0=顺序, 1=随机, 2=单曲循环
         self.volume = 80
         self.is_mini_mode = False
+        self.lyrics = []  # [(time_ms, text), ...]
+        self.current_lyric_idx = -1
 
         self.audio_output = QAudioOutput()
         self.audio_output.setVolume(self.volume / 100)
@@ -83,6 +302,13 @@ class MusicPlayer(QMainWindow):
         btn_add.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         btn_add.clicked.connect(self.add_files)
         hlayout.addWidget(btn_add)
+
+        btn_add_folder = QPushButton("📁")
+        btn_add_folder.setFixedSize(32, 26)
+        btn_add_folder.setStyleSheet("font-size: 11px; padding: 2px 4px;")
+        btn_add_folder.setToolTip("添加文件夹")
+        btn_add_folder.clicked.connect(self.add_folder)
+        hlayout.addWidget(btn_add_folder)
 
         btn_clear = QPushButton("清空")
         btn_clear.setFixedSize(40, 26)
@@ -147,6 +373,20 @@ class MusicPlayer(QMainWindow):
 
         right_layout.addWidget(info_widget, 1)
 
+        # 歌词显示区
+        self.lyrics_widget = QListWidget()
+        self.lyrics_widget.setFont(QFont("Microsoft YaHei", 13))
+        self.lyrics_widget.setStyleSheet("""
+            QListWidget { background-color: transparent; color: #888; border: none; padding: 10px; }
+            QListWidget::item { padding: 6px 10px; border-radius: 4px; text-align: center; }
+            QListWidget::item:selected { background-color: transparent; color: #4a9eff; }
+        """)
+        self.lyrics_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lyrics_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lyrics_widget.setMaximumHeight(220)
+        self.lyrics_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        right_layout.addWidget(self.lyrics_widget, 1)
+
         # 进度条
         self.progress_slider = QSlider(Qt.Orientation.Horizontal)
         self.progress_slider.setRange(0, 1000)
@@ -205,11 +445,7 @@ class MusicPlayer(QMainWindow):
         self.btn_next.clicked.connect(self.play_next)
         ctrl_layout.addWidget(self.btn_next)
 
-        self.btn_random = QPushButton("🔀")
-        self.btn_random.setFixedSize(36, 36)
-        self.btn_random.setToolTip("随机播放")
-        self.btn_random.clicked.connect(self.toggle_random)
-        ctrl_layout.addWidget(self.btn_random)
+        # 随机播放功能已集成到模式按钮中
 
         right_layout.addLayout(ctrl_layout)
 
@@ -325,6 +561,19 @@ class MusicPlayer(QMainWindow):
         if files:
             self._add_to_playlist(files)
 
+    def add_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择音乐文件夹")
+        if folder:
+            files = []
+            for root, dirs, filenames in os.walk(folder):
+                for filename in filenames:
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma', '.ape', '.opus', '.mka']:
+                        files.append(os.path.join(root, filename))
+            if files:
+                self._add_to_playlist(files)
+                self.statusBar().showMessage(f"已导入 {len(files)} 首歌曲", 3000)
+
     def _add_to_playlist(self, files):
         start_idx = len(self.playlist)
         for f in files:
@@ -425,7 +674,9 @@ class MusicPlayer(QMainWindow):
         except Exception as e:
             self.lbl_title.setText(os.path.basename(path))
             self.lbl_artist.setText("")
-            self.lbl_album.setText("")
+        
+        # 加载歌词
+        self._load_lyrics(path)
 
     def _fmt_time(self, ms):
         if ms <= 0:
@@ -446,6 +697,9 @@ class MusicPlayer(QMainWindow):
             self.progress_slider.setValue(int(pos / dur * 1000))
             self.progress_slider.blockSignals(False)
             self.lbl_current.setText(self._fmt_time(pos))
+        
+        # 更新歌词高亮
+        self._update_lyrics_highlight(pos)
 
     def _on_duration_changed(self, dur):
         self.lbl_total.setText(self._fmt_time(dur))
@@ -532,12 +786,7 @@ class MusicPlayer(QMainWindow):
         self.btn_mode.setText(icons[self.play_mode])
         self.btn_mode.setToolTip(PLAY_MODES[self.play_mode])
 
-    def toggle_random(self):
-        if self.play_mode == 1:
-            self.play_mode = 0
-        else:
-            self.play_mode = 1
-        self._update_mode_button()
+    # toggle_random 方法已移除（随机功能集成到 cycle_mode 中）
 
     def set_volume(self, vol):
         self.volume = vol
@@ -564,16 +813,63 @@ class MusicPlayer(QMainWindow):
             self.enter_mini_mode()
 
     def enter_mini_mode(self):
+        """进入迷你模式 - 使用独立窗口，不修改主窗口"""
         self.is_mini_mode = True
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        self.resize(400, 120)
-        self.show()
+        
+        # 保存主窗口状态和播放状态
+        self._normal_geometry = self.saveGeometry()
+        self._was_playing = (self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        self._saved_position = self.media_player.position()  # 保存当前播放位置
+        
+        # 隐藏主窗口（不要调用hide，避免触发某些Qt问题）
+        self.setVisible(False)
+        
+        # 创建迷你窗口
+        self.mini_window = MiniModeWindow(self)
+        self.mini_window.update_display()
+        self.mini_window.show()
+        
+        # 启动定时器更新迷你窗口
+        self.mini_timer = QTimer(self)
+        self.mini_timer.timeout.connect(self._update_mini_window)
+        self.mini_timer.start(500)  # 每500ms更新一次
 
     def exit_mini_mode(self):
+        """退出迷你模式"""
         self.is_mini_mode = False
-        self.setWindowFlags(Qt.WindowType.Window)
-        self.resize(1100, 700)
-        self.show()
+        
+        # 停止定时器
+        if hasattr(self, 'mini_timer') and self.mini_timer:
+            self.mini_timer.stop()
+            self.mini_timer = None
+        
+        # 关闭迷你窗口
+        if hasattr(self, 'mini_window') and self.mini_window:
+            self.mini_window.close()
+            self.mini_window = None
+        
+        # 显示主窗口（使用setVisible而不是show，避免触发窗口状态变化）
+        self.setVisible(True)
+        
+        # 恢复主窗口位置和大小
+        if hasattr(self, '_normal_geometry'):
+            self.restoreGeometry(self._normal_geometry)
+        self.raise_()
+        self.activateWindow()
+        
+        # 恢复播放位置（关键：先设置位置，再恢复播放）
+        saved_pos = getattr(self, '_saved_position', 0)
+        if saved_pos > 0:
+            self.media_player.setPosition(saved_pos)
+        
+        # 恢复播放状态（如果之前正在播放）
+        if getattr(self, '_was_playing', False):
+            self.media_player.play()
+
+    def _update_mini_window(self):
+        """更新迷你窗口显示"""
+        if hasattr(self, 'mini_window') and self.mini_window and self.mini_window.isVisible():
+            self.mini_window.update_display()
 
     def remove_current(self):
         if 0 <= self.current_index < len(self.playlist):
@@ -590,12 +886,119 @@ class MusicPlayer(QMainWindow):
 
     def dropEvent(self, event):
         files = []
+        folders = []
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if os.path.isfile(path):
                 files.append(path)
+            elif os.path.isdir(path):
+                folders.append(path)
+        
+        # 处理拖拽的文件
         if files:
             self._add_to_playlist(files)
+        
+        # 处理拖拽的文件夹
+        for folder in folders:
+            folder_files = []
+            for root, dirs, filenames in os.walk(folder):
+                for filename in filenames:
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma', '.ape', '.opus', '.mka']:
+                        folder_files.append(os.path.join(root, filename))
+            if folder_files:
+                self._add_to_playlist(folder_files)
+                self.statusBar().showMessage(f"已导入文件夹: {len(folder_files)} 首歌曲", 3000)
+
+    def _load_lyrics(self, path):
+        """加载并解析LRC歌词文件"""
+        self.lyrics_data = []
+        self.lyrics_widget.clear()
+        
+        # 查找同名的.lrc文件
+        base = os.path.splitext(path)[0]
+        lrc_path = base + '.lrc'
+        
+        if not os.path.exists(lrc_path):
+            # 尝试在同一文件夹中查找匹配的歌词
+            folder = os.path.dirname(path)
+            name = os.path.splitext(os.path.basename(path))[0]
+            for f in os.listdir(folder):
+                if f.lower().endswith('.lrc') and name.lower() in f.lower():
+                    lrc_path = os.path.join(folder, f)
+                    break
+        
+        if not os.path.exists(lrc_path):
+            self.lyrics_widget.addItem("暂无歌词")
+            return
+        
+        try:
+            with open(lrc_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except:
+            try:
+                with open(lrc_path, 'r', encoding='gbk') as f:
+                    content = f.read()
+            except:
+                self.lyrics_widget.addItem("歌词加载失败")
+                return
+        
+        # 解析LRC格式 [mm:ss.xx]歌词内容
+        import re
+        pattern = re.compile(r'\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)')
+        
+        for line in content.split('\n'):
+            line = line.strip()
+            matches = pattern.findall(line)
+            for match in matches:
+                minutes = int(match[0])
+                seconds = int(match[1])
+                millis = int(match[2].ljust(3, '0')[:3])
+                text = match[3].strip()
+                if text:
+                    time_ms = (minutes * 60 + seconds) * 1000 + millis
+                    self.lyrics_data.append((time_ms, text))
+        
+        self.lyrics_data.sort(key=lambda x: x[0])
+        
+        # 显示歌词
+        for _, text in self.lyrics_data:
+            item = QListWidgetItem(text)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # 不可选中
+            self.lyrics_widget.addItem(item)
+        
+        if not self.lyrics_data:
+            self.lyrics_widget.addItem("暂无歌词")
+
+    def _update_lyrics_highlight(self, pos_ms):
+        """根据当前播放位置高亮歌词"""
+        if not self.lyrics_data:
+            return
+        
+        # 找到当前播放位置对应的歌词行
+        current_idx = 0
+        for i, (time_ms, _) in enumerate(self.lyrics_data):
+            if time_ms <= pos_ms:
+                current_idx = i
+            else:
+                break
+        
+        # 高亮当前行
+        for i in range(self.lyrics_widget.count()):
+            item = self.lyrics_widget.item(i)
+            if i == current_idx:
+                item.setForeground(Qt.GlobalColor.cyan)
+                item.setFont(QFont("Microsoft YaHei", 14, QFont.Weight.Bold))
+            else:
+                item.setForeground(Qt.GlobalColor.gray)
+                item.setFont(QFont("Microsoft YaHei", 13))
+        
+        # 滚动到当前行
+        self.lyrics_widget.scrollToItem(
+            self.lyrics_widget.item(current_idx),
+            QAbstractItemView.ScrollHint.PositionAtCenter
+        )
 
     def closeEvent(self, event):
         self._save_config()
